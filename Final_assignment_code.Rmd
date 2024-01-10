@@ -1,0 +1,690 @@
+---
+title: "Final Assignment"
+author: "Jiayu Wen"
+date: "AT 2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# this chunk contains code that sets global options for the entire .Rmd. 
+# we use include=FALSE to suppress it from the top of the document, but it will still appear in the appendix. 
+
+knitr::opts_chunk$set(echo = FALSE) # actually set the global chunk options. 
+# we set echo=FALSE to suppress code such that it by default does not appear throughout the document. 
+# note: this is different from .Rmd default
+```
+
+## Github repo
+
+<https://github.com/ZJDL-jw/MY472_Final_Assignment>
+
+## Introduction
+
+Oral and written questions allow Members of Parliament (MPs) in the House of Commons to query the government and its ministers on their work. The research question is:
+
+"What characteristics and factors discriminate MPs who tend to ask questions about economic issues from MPs who tend to ask questions about health and welfare issues?"
+
+```{r libraries, include=FALSE}
+# Load necessary libraries for data handling, parsing, and visualization
+library("httr")
+library("jsonlite")
+library("tidyverse")
+library("rvest")
+library("ggplot2")
+```
+
+## Data
+
+### Time frame
+
+Generally, public health events could raise people's awareness of health and welfare, while long-term economic ups or downs could reduce or attract people's attention to economic issues. Moreover, the components of MP could change after a general election. Therefore, the time frame should be before COVID-19's outbreak, between two general elections and without dramatic economic alterations. The period 2018-07-01 to 2019-06-30, the second half of the UK's 57th Parliament, is appropriate for the research, where GDP annual growth was steady with fluctuation between quarters.
+
+```{r Define time frame}
+# Create a sequence of dates from 2018-07-05 to 2019-07-03 for oral questions
+oral_date_sequence <- seq(as.Date("2018-07-05"), as.Date("2019-07-03"), by = "day")
+
+# Create a sequence of dates from 2018-07-01 to 2019-06-30 for written questions
+written_date_sequence <- seq(as.Date("2018-07-01"), as.Date("2019-06-30"), by = "day")
+```
+
+Since UK Parliament API only provides the answered time for scraping oral questions, I chose the oral questions answered between 2018-07-05 and 2019-07-03. The written questions tabled from 2018-07-01 to 2019-06-30 were picked.
+
+### Web-scrape the oral and written questions
+
+The criteria to define an MP's tendency to ask questions can be the questions' answering body, assuming that MPs are political experts and know where to propose their questions on specific topics.
+
+```{r Web scraper for oral questions}
+# Function to scrape oral questions from the UK Parliament API for a given date sequence
+oral_questions_scraper <- function(date_sequence){
+  
+  # Initial URL for the first date in the sequence
+  oral_url <- "https://oralquestionsandmotions-api.parliament.uk/oralquestions/list?parameters.answeringDateStart=2018-07-05&parameters.answeringDateEnd=2018-07-05&parameters.take=100"
+  
+  # Retrieve initial set of oral questions and select relevant columns
+  oral_questions <- fromJSON(oral_url)[['Response']] %>%
+    select("Id", "AskingMemberId", "AnsweringBodyId", "AnsweringBody")
+  
+  # Loop through the remaining dates in the sequence
+  for(i in 2:length(date_sequence)){
+    # Construct URL for each date in the sequence
+    oral_url <- paste0("https://oralquestionsandmotions-api.parliament.uk/oralquestions/list?parameters.answeringDateStart=", date_sequence[i], "&parameters.answeringDateEnd=", date_sequence[i], "&parameters.take=100")
+    
+    # Retrieve oral questions for the current date
+    temp_oralQuestion <- fromJSON(oral_url)[['Response']]
+    
+    # Check if there are any questions for the current date
+    if(length(temp_oralQuestion)!= 0){
+      # Select relevant columns and bind them to the existing oral_questions data frame
+      temp_oralQuestion <- temp_oralQuestion %>%
+        select("Id", "AskingMemberId", "AnsweringBodyId", "AnsweringBody")
+      oral_questions <- oral_questions %>%
+        bind_rows(temp_oralQuestion)
+    }
+  }
+  # Return the final data frame of oral questions
+  return(oral_questions)
+}
+```
+
+```{r Web scraper for written questions}
+# Function to scrape written questions from the specified API for a given date sequence
+written_questions_scraper <- function(date_sequence){
+  
+  # Initial URL for the first date in the sequence
+  written_url <- paste0("https://questions-statements-api.parliament.uk/api/writtenquestions/questions?tabledWhenFrom=2018-07-02&tabledWhenTo=2018-07-02&includeWithdrawn=true&house=Commons&take=1000")
+  
+  # Retrieve initial set of written questions and select relevant columns
+  written_questions <- fromJSON(written_url)[['results']][['value']] %>%
+    select("id", "askingMemberId", "answeringBodyId", "answeringBodyName")
+  
+  # Loop through the remaining dates in the sequence
+  for(i in 3:length(date_sequence)){
+    # Construct URL for each date in the sequence
+    written_url <- paste0("https://questions-statements-api.parliament.uk/api/writtenquestions/questions?tabledWhenFrom=", date_sequence[i], "&tabledWhenTo=", date_sequence[i], "&includeWithdrawn=true&house=Commons&take=1000")
+    
+    # Retrieve written questions for the current date
+    temp_writtenQuestion <- fromJSON((written_url))[['results']][['value']]
+    
+    # Check if there are any questions for the current date
+    if(length(temp_writtenQuestion)!= 0){
+      # Select relevant columns and bind them to the existing written_questions data frame
+      temp_writtenQuestion <- temp_writtenQuestion %>%
+        select("id", "askingMemberId", "answeringBodyId", "answeringBodyName")
+      written_questions <- written_questions %>%
+        bind_rows(temp_writtenQuestion)
+    }
+  }
+  # Return the final data frame of written questions
+  return(written_questions)
+}
+```
+
+```{r Scrape oral and written questions, include=FALSE, cache=TRUE}
+# Scrape oral questions for the specified date sequence
+oral_questions <- oral_questions_scraper(oral_date_sequence)
+
+# Scrape written questions for the specified date sequence
+written_questions <- written_questions_scraper(written_date_sequence)
+```
+
+### Data Inspection
+
+In data inspection, I find only one occurrence of "Chancellor of the Duchy of Lancaster". Therefore, I transform it and the number of answering bodies is 30.
+
+```{r Inspect the scraped data, include=FALSE}
+# Set column names of written_questions to match oral_questions
+colnames(written_questions) <- colnames(oral_questions)
+
+# Combine oral and written questions into a single data frame
+all_questions <- rbind(oral_questions, written_questions)
+
+# Display unique values in the AnsweringBody column
+unique(all_questions$AnsweringBody)
+
+# Display unique values in the AnsweringBodyId column
+unique(all_questions$AnsweringBodyId)
+
+# Count the occurrences of "Chancellor of the Duchy of Lancaster", the minister of the Cabinet Office, in AnsweringBody
+sum(all_questions$AnsweringBody == "Chancellor of the Duchy of Lancaster")
+
+# Replace occurrences of "Chancellor of the Duchy of Lancaster" with "Cabinet Office" in AnsweringBody
+all_questions$AnsweringBody[all_questions$AnsweringBody == "Chancellor of the Duchy of Lancaster"] <- "Cabinet Office"
+
+# Replace occurrences of "205" with "53" (the Id of Cabinet Office) in AnsweringBodyId
+all_questions$AnsweringBodyId[all_questions$AnsweringBodyId == "205"] <- "53"
+```
+
+```{r Missing values}
+# Count missing values for each column
+missing_counts <- c()
+for(col_name in colnames(all_questions)) {
+  missing_counts[col_name] <- sum(is.na(all_questions[col_name]))
+}
+rm(col_name)
+# Display the counts of missing values
+missing_counts
+```
+
+From `List 1`, there is no missing value, which is suitable for further research.
+
+### Tendency for economic or health and welfare issues
+
+For economic issues, I choose four answering bodies: the Department for Business, Energy and Industrial Strategy, Department for International Trade, Treasury, and Department for Transport. For health and welfare issues, I choose the Department for Work and Pensions, the Department of Health and Social Care and the Department for Education.
+
+```{r Summarise the questions}
+# Define department IDs related to economic issues
+economic_dep_id <- c("27", "201", "14", "202")
+
+# Create a summary table for economic questions
+summary_economic <- all_questions %>%
+  group_by(AskingMemberId) %>%
+  summarise(Economic = sum(AnsweringBodyId %in% economic_dep_id),
+            Total = n(),
+            Non_economic = Total - Economic) %>%
+  select("AskingMemberId", "Economic", "Non_economic", "Total")
+
+# Rename columns for clarity
+colnames(summary_economic) <- c("MP_Id", "Economic", "Non_economic", "Total")
+
+# Define department IDs related to health and welfare issues
+healthAndWelfare_dep_id <- c("17", "60", "29")
+
+# Create a summary table for health and welfare questions
+summary_healthAndWelfare <- all_questions %>%
+  group_by(AskingMemberId) %>%
+  summarise(Health_and_Welfare = sum(AnsweringBodyId %in% healthAndWelfare_dep_id),
+            Total = n(),
+            Non_hw = Total - Health_and_Welfare) %>%
+  select("AskingMemberId", "Health_and_Welfare", "Non_hw", "Total")
+
+# Rename columns for clarity
+colnames(summary_healthAndWelfare) <- c("MP_Id", "Health_and_Welfare", "Non_hw", "Total")
+```
+
+An MP that tends to ask economic-related questions is defined as the one whose frequency of asking questions to the four departments is significantly higher than its expected frequency by a binomial test under the assumption that an MP would evenly ask questions to every department. The same applies to health and welfare-related questions. If an MP tends to ask both kinds of questions, the tendency with more asked questions would be chosen.
+
+```{r Pick out the MPs with a tendency on economic or health and welfare issues or both, cache=TRUE}
+# Set the expected probabilities for economic and health and welfare issues
+econ_expected_prob <- 4/30 # 4 economic related departments out of 30
+hw_expected_prob <- 3/30 # 3 health and welfare related departments out of 30
+
+# Identify MPs with a tendency towards economic issues
+MP_econ <- sapply(1:nrow(summary_economic), function(i){
+  econ_num <- summary_economic$Economic[i]
+  total_num <- summary_economic$Total[i]
+  p_value <- binom.test(econ_num, total_num, p = econ_expected_prob)$p.value
+  
+  # Check significance and tendency based on p-value and ratio
+  if(p_value < 0.05 & econ_num/total_num > econ_expected_prob){
+  MP <- summary_economic$MP_Id[i]
+  return(MP)
+  }
+})
+MP_econ <- unlist(MP_econ)
+
+# Identify MPs with a tendency towards health and welfare issues
+MP_healthAndWelfare <- sapply(1:nrow(summary_healthAndWelfare), function(i){
+  hw_num <- summary_healthAndWelfare$Health_and_Welfare[i]
+  total_num <- summary_healthAndWelfare$Total[i]
+  p_value <- binom.test(hw_num, total_num, p = hw_expected_prob)$p.value
+  
+  # Check significance and tendency based on p-value and ratio
+  if(p_value < 0.05 & hw_num/total_num > hw_expected_prob){
+  MP <- summary_economic$MP_Id[i]
+  return(MP)
+  }
+})
+MP_healthAndWelfare <- unlist(MP_healthAndWelfare)
+
+# Identify MPs with a tendency towards both economic and health and welfare issues
+MP_both <- MP_econ[MP_econ %in% MP_healthAndWelfare]
+
+# Remove MPs based on the dominance of tendencies
+for(MP in MP_both){
+  econ_num <- summary_economic$Economic[summary_economic$MP_Id == MP]
+  hw_num <- summary_healthAndWelfare$Health_and_Welfare[summary_healthAndWelfare$MP_Id == MP]
+  # Determine the dominant tendency and remove MPs from another tendency accordingly
+  if(econ_num > hw_num){
+    MP_healthAndWelfare <- MP_healthAndWelfare[!MP_healthAndWelfare %in% MP]
+    MP_both <- MP_both[!MP_both %in% MP]
+  } else if(econ_num < hw_num){
+    MP_econ <- MP_econ[!MP_econ %in% MP]
+    MP_both <- MP_both[!MP_both %in% MP]
+  } else{
+    MP_healthAndWelfare <- MP_healthAndWelfare[!MP_healthAndWelfare %in% MP]
+    MP_econ <- MP_econ[!MP_econ %in% MP]
+  }
+}
+rm(MP, econ_num, hw_num, MP_both)
+
+# Create a index table for further analysis with MPs and their tendencies
+dataForAnalysis <- data.frame(MP_Id = MP_econ) %>%
+  mutate(Tendency = 0) %>%
+  rbind(data.frame(MP_Id = MP_healthAndWelfare) %>%
+          mutate(Tendency = 1)
+        )
+```
+
+### Factors and characteristics
+
+The next step is identifying the potential factors and characteristics leading to discrimination. Three aspects are explored: demographic ones include gender, and socio-economic ones involve an MP's constituency's greater region. I use the region because it would be a tremendous workload to web-scrape the out-source socio-economic data, and the constituencies within the same region share similar features that the region can represent. As for political factors, an MP's party, political interests, time in office and committee memberships are considered.
+
+```{r Economic and Health and Welfare policy interests and their the regular expressions, cache=TRUE}
+# Fetch the list of policy interests from the specified API
+policyInterests_list <- fromJSON("https://members-api.parliament.uk/api/Reference/PolicyInterests")
+
+# Define regular expressions for economic and health and welfare policy interests
+regexEcon <- c(".*business.*", ".*industr.*", ".*consum.*", ".*econom.*", ".*financ.*", ".*employ.*", ".*training", ".*energy.*", ".*trade.*", ".*transport.*", "treasury")
+regexHW <- c(".*educat.*", ".*health.*", ".*medic.*", "social security", "social affair.*", ".*welfare.*", ".*pension.*", ".*diabet.*")
+```
+
+```{r The scraper for the characteristics and factors of MPs}
+# Function to scrape various characteristics and features of MPs based on their IDs
+var_scraper <- function(index_table){
+  
+  # Initialize variables to store information
+  MP_id <- index_table$MP_Id
+  name <- c()
+  gender <- c()
+  region <- c()
+  party <- list()
+  ifEconInterest <- c()
+  ifHWInterest <- c()
+  servicesLength <- c()
+  committee <- list()
+  
+  # Loop through each MP ID to gather information
+  for(id in MP_id){
+    id <- as.character(id)
+    
+    # Retrieve MP overview information
+    overview_url <- paste0("https://members-api.parliament.uk/api/Members/", id)
+    overview <- fromJSON(overview_url)
+    name[id] <- overview$value$nameDisplayAs
+    gender[id] <- overview$value$gender
+    
+    # Helper function to get names within a date frame
+    getName_within_dateframe <- function(df){
+      name <- c()
+      if(!identical(df, list())){
+        df <- df %>%
+          mutate(endDate = if_else(is.na(endDate), "2024-01-09T00:00:00", endDate))
+        for(i in 1:nrow(df)){
+          if((between(ymd("2018-07-01"), ymd_hms(df$startDate[i]), ymd_hms(df$endDate)[i]) | between(as.Date("2019-06-30"), ymd_hms(df$startDate[i]), ymd_hms(df$endDate)[i])) | (ymd("2018-07-01") <= ymd_hms(df$startDate[i]) & as.Date("2019-06-30") >= ymd_hms(df$endDate)[i])){
+            name <- c(name, df$name[i])
+          }
+        }
+        if(is.null(name)){
+          name <- NA
+        }
+      } else{name <- NA} 
+      return(name)
+    }
+    
+    # Retrieve MP biography information
+    bio_url <- paste0("https://members-api.parliament.uk/api/Members/", id ,"/Biography")
+    biography <- fromJSON(bio_url)
+    
+    # Extract committee, party, and constituency's region information
+    committees_df <- biography$value$committeeMemberships
+    committee[[id]] <- unique(getName_within_dateframe(committees_df))
+    
+    parties_df <- biography$value$partyAffiliations
+    party[[id]] <- unique(getName_within_dateframe(parties_df))
+    
+    constituencies_df <- biography$value$representations
+    constitueny <- getName_within_dateframe(constituencies_df)
+    # Get the ID of the constituency using the constituency name
+    constitueny_id <- constituencies_df$id[constituencies_df$name == constitueny]
+    constituency_url <- paste0("https://members-api.parliament.uk/api/Location/Constituency/", constitueny_id ,"/Synopsis")
+    synopsis <- fromJSON(constituency_url)$value
+    # Extract the region information using regular expressions from the synopsis
+    region[id] <- str_match(synopsis, "region/region/(.*?)'>")[,2]
+    # If region information is not found, try extracting country information
+    if(is.na(region[id])){
+      region[id] <- str_match(synopsis, "/region/country/(.*?)'>")[,2]
+    }
+    
+    # Extract policy interests and determine if there is an interest in economic and health and welfare
+    policyInterests <- fromJSON(paste0("https://members-api.parliament.uk/api/Members/", id, "/Focus"))[["value"]]
+    if(length(policyInterests)!= 0){
+      policyInterests <- policyInterests$focus[policyInterests$category == "Political Interests"] %>%
+        str_to_lower() %>%
+        str_split(", ") %>%
+        unlist()
+    }
+    
+    ifEconInterest[id] <- 0
+    ifHWInterest[id] <- 0
+    
+    for(interest in policyInterests){
+      if(ifEconInterest[id] == 0){
+        for(regex_econ in regexEcon){
+          if(str_detect(interest, regex_econ)){
+            ifEconInterest[id] <- 1
+            break
+          }
+        }
+      }
+      if(ifHWInterest[id] == 0){
+        for(regex_hw in regexHW){
+          if(str_detect(interest, regex_hw)){
+            ifHWInterest[id] <- 1
+            break
+          }
+        }
+      }
+      if(ifEconInterest[id] == 1 & ifHWInterest[id] == 1){
+        break
+      }
+    }
+    
+    # Retrieve MP history information to calculate years in office
+    history_url <- paste0("https://members-api.parliament.uk/api/Members/History?ids=", id)
+    startDate <- fromJSON(history_url)$value$houseMembershipHistory[[1]]
+    startDate <- ymd_hms(startDate$membershipStartDate[1])
+    
+    # Helper function to get years between a date and the end date of the dataset
+    getYearsBetween <- function(date){
+      days <- difftime(as.Date("2019-06-30"), date, units = "days")
+      years <- as.double(round(days / 365.25, digits = 2))
+      return(years)
+    } 
+    servicesLength[id] <- getYearsBetween(startDate)
+  }
+  
+  # Store results in a list
+  result_list <- list("Name" = name, "Gender" = gender, "Region" = region, "Party" = party, "ifEconInterest" = ifEconInterest, "ifHWInterest" = ifHWInterest, "servicesLength" = servicesLength, "Committee" = committee)
+  return(result_list)
+}
+```
+
+```{r Scraped variables, cache=TRUE}
+# Scrape the variables for the MPs in the dataForAnalysis dataframe
+variables <- var_scraper(dataForAnalysis)
+```
+
+```{r Combine the variables with the index table}
+# Combine the variables scraped from the API with the original index table
+dataForAnalysis <- cbind(dataForAnalysis, variables$Name, variables$Gender, variables$Region, variables$ifEconInterest, variables$ifHWInterest, variables$servicesLength) %>%
+  mutate("Committee Memberships" = variables$Committee) %>%
+  mutate("Party" = variables$Party) %>%
+  mutate(`variables$Gender` = if_else(`variables$Gender` == "M", "Male", "Female"))
+
+# Rename the columns for better clarity
+colnames(dataForAnalysis) <- c("MP_Id", "Tendency", "Name", "Gender", "Region", "Economic Policy Interests?", "Health and Welfare Policy Interests?", "Time In Office", "Committee Memberships", "Party")
+
+# Reorder the table
+dataForAnalysis <- dataForAnalysis %>%
+  select("MP_Id", "Name", "Gender", "Region", "Party", "Committee Memberships", "Economic Policy Interests?", "Health and Welfare Policy Interests?", "Time In Office", "Tendency")
+```
+
+### Split the data for analysis
+
+Once the three parts of data are stored in a table, I split the data by variable for further analysis.
+
+```{r Split the data for plotting and statistical test, include=FALSE}
+# Extract data for gender analysis
+data_gender <- dataForAnalysis %>%
+  select("Gender", "Tendency")
+
+# Extract data for region analysis
+data_region <- dataForAnalysis %>%
+  select("Region", "Tendency")
+
+# Extract data for economic policy interest analysis
+data_econPolicyInterest <- dataForAnalysis %>%
+  select("Economic Policy Interests?", "Tendency")
+
+# Extract data for health and welfare policy interest analysis
+data_hwPolicyInterest <- dataForAnalysis %>%
+  select("Health and Welfare Policy Interests?", "Tendency")
+
+# Extract data for time in office analysis
+data_timeInOffice <- dataForAnalysis %>%
+  select("Time In Office", "Tendency")
+
+# Helper function to convert data to long format for certain columns
+get_longFormatData <- function(df, colName){
+  data <- df %>%
+    # Select relevant columns and unnest the specified column
+    select(colName, "Tendency") %>%
+    unnest(colName)
+  
+  # Filter out rows with NA values in the specified column
+  data <- filter(data, !is.na(data[[colName]]))
+  return(data)
+}
+# Extract data for committee analysis in long format
+data_committee <- get_longFormatData(dataForAnalysis, "Committee Memberships")
+
+# Extract data for party analysis in long format
+data_party <- get_longFormatData(dataForAnalysis, "Party")
+```
+
+## Analysis
+
+### Data Distributions
+
+```{r Plot the data distributions for each tendency, cache=TRUE}
+# Create a bar plot for gender distribution
+plot_gender <- data_gender %>%
+  ggplot(aes(x = Gender, fill = as.factor(Tendency))) +
+  geom_bar(position = "dodge") +
+  scale_fill_manual(values = c("cyan3", "brown1"), 
+                    labels = c("Economic", "Health and Welfare"), 
+                    name = "Tendency") +
+  labs(title = "Figure 1. The Distribution of MPs' Tendency for each Gender",
+    x = "Gender", y = "Frenquency") +
+  theme_minimal()
+
+# Create a bar plot for region distribution
+plot_region <- data_region %>%
+  ggplot(aes(x = Region, fill = as.factor(Tendency))) +
+  geom_bar(position = "dodge") +
+  scale_fill_manual(values = c("blue", "red"), 
+                    labels = c("Economic", "Health and Welfare"), 
+                    name = "Tendency") +
+  labs(title = "Figure 2. The Distribution of MPs' Tendency for each Region",
+       x = "Region", y = "Frenquency") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.background = element_rect(fill = "azure")
+  )
+
+# Create a bar plot for economic policy interest distribution
+plot_econPolicyInterest <- data_econPolicyInterest %>%
+  ggplot(aes(x = as.factor(`Economic Policy Interests?`), fill = as.factor(Tendency))) +
+  geom_bar(position = "dodge") +
+  scale_fill_manual(values = c("blue", "red"), 
+                    labels = c("Economic", "Health and Welfare"), 
+                    name = "Tendency") +
+  scale_x_discrete(labels = c("No", "Yes")) +
+  labs(title = "Figure 3. The Distribution of MPs' Tendency for whether the MP has Economic Policy Interests",
+       x = "Economic Policy Interests?", y = "Frenquency") +
+  theme_minimal()
+
+# Create a bar plot for health and welfare policy interest distribution
+plot_hwPolicyInterest <- data_hwPolicyInterest %>%
+  ggplot(aes(x = as.factor(`Health and Welfare Policy Interests?`), fill = as.factor(Tendency))) +
+  geom_bar(position = "dodge") +
+  scale_fill_manual(values = c("blue", "red"), 
+                    labels = c("Economic", "Health and Welfare"), 
+                    name = "Tendency") +
+  scale_x_discrete(labels = c("No", "Yes")) +
+  labs(title = "Figure 4. The Distribution of MPs' Tendency for whether the MP has Health and Welfare Policy Interests",
+       x = "Health and Welfare Policy Interests?", y = "Frenquency") +
+  theme_minimal()
+
+# Create a bar plot for committee membership distribution
+plot_committee <- data_committee %>%
+  ggplot(aes(x = `Committee Memberships`, fill = as.factor(Tendency))) +
+  geom_bar(position = position_dodge()) +
+  scale_fill_manual(values = c("cyan3", "brown1"), 
+                    labels = c("Economic", "Health and Welfare"), 
+                    name = "Tendency") +
+  labs(title = "Figure 5. The Distribution of MPs' Tendency for each Committee Membership",
+       x = "Committee Memberships", y = "Frenquency") +
+  theme(
+    axis.text.x = element_blank(),
+    panel.background = element_rect(fill = "azure"),
+  )
+
+# Create a detailed bar plot for committee membership distribution with labels
+plot_committee_detailed <- data_committee %>%
+  ggplot(aes(x = `Committee Memberships`, fill = as.factor(Tendency))) +
+  geom_bar(position = position_dodge()) +
+  scale_fill_manual(values = c("cyan3", "brown1"), 
+                    labels = c("Economic", "Health and Welfare"), 
+                    name = "Tendency") +
+  labs(title = "Figure 5. The Distribution of MPs' Tendency for each Committee Membership",
+       x = "Committee Memberships", y = "Frenquency") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.background = element_rect(fill = "azure"),
+  )
+ggsave("Committee_Memberships_detailed.png", width = 20, height = 8)
+
+# Create a bar plot for party distribution
+plot_party <- data_party %>%
+  ggplot(aes(x = `Party`, fill = as.factor(Tendency))) +
+  geom_bar(position = position_dodge()) +
+  scale_fill_manual(values = c("cyan3", "brown1"), 
+                    labels = c("Economic", "Health and Welfare"), 
+                    name = "Tendency") +
+  labs(title = "Figure 6. The Distribution of MPs' Tendency for each Party",
+       x = "Party", y = "Frenquency") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.background = element_rect(fill = "azure"),
+  )
+
+# Create a box plot for time in office distribution by tendency
+plot_timeInOffice <- data_timeInOffice %>% 
+  ggplot(aes(x = as.factor(Tendency), y = `Time In Office`)) + 
+  geom_boxplot() +
+  labs(title = "Figure 7. The Distribution of MPs' Time In Office for each Tendency",
+       x = "Tendency",
+       y = "Time in Office") +
+  scale_x_discrete(labels = c("Economic", "Health and Welfare"))
+
+# Print the generated plots
+print(plot_gender)
+print(plot_region)
+print(plot_econPolicyInterest)
+print(plot_hwPolicyInterest)
+print(plot_committee)
+print(plot_party)
+print(plot_timeInOffice)
+```
+
+`Figure 1` to `Figure 6` show the distribution of MPs' tendencies for each gender and region, whether the MP has economic or health and welfare policy interests, and each committee membership and party. `Figure 7` reports the distribution of MP's time in office for each tendency.
+
+From `Figure 1`, the proportion of female MPs with a tendency for health and welfare is significantly higher than that of male MPs, implying gender may influence an MP's tendency.
+
+As for the region, committee membership and party, from `Figure 2`, `Figure 5` and `Figure 6` that there are notable variations between the categories. In some regions, committees and parties, the number of MPs with a tendency for economic issues is much higher than others, even equal to or superseding the number of MPs with a tendency for health and welfare. It suggests that region, committee membership and party may distinguish the MPs.
+
+However, there is no apparent difference between whether the MP has economic or health and welfare policy interests; the same goes for the time in office for each tendency. They likely have no association with an MP's tendency.
+
+### Statistical Tests
+
+```{r Statistical Tests}
+# Combine all the datasets into a list for testing
+datasets <- list(data_gender, data_region, data_econPolicyInterest, data_hwPolicyInterest, data_committee, data_party)
+
+# Initialize a vector to store p-values
+p_values <- c()
+
+# Perform chi-square tests for categorical factors and characteristics
+for(i in 1:length(datasets)){
+  p_values <- c(p_values, chisq.test(table(datasets[[i]]))$p.value)
+}
+
+# Perform logistic regression for the continuous feature (Time In Office)
+# Create a logistic regression model
+model <- glm(Tendency ~ `Time In Office`, data = data_timeInOffice, family = "binomial")
+
+# Extract p-value for Time In Office
+p_values <- c(p_values, summary(model)$coefficients[, 4][2])
+print(p_values)
+```
+
+From `List 2`, the p-values show a significant difference in MP's tendency between groups of gender and party.
+
+Therefore, `gender` and `party` are the characteristics and factors that discriminate between MPs who tend to ask questions about economic issues and those who tend to ask about health and welfare issues.
+
+```{r, eval=FALSE}
+# These are the codes I tried to scrape the MP's birthdays on Wikipedia.
+# However, due to a large number of situations where the birthday is not 
+# in the standard format, or there are multiple people under the same URL 
+# which cannot be parsed sometimes, I decided not to continue to 
+# scrape this feature but keep the code in the appendix.
+
+# Check if the name contains "Sir" or "Mr" and remove it
+if(str_detect(name[id], "Sir")){
+  name[id] <- gsub("Sir ", "", name[id])
+} else if(str_detect(name[id], "Mr")){
+  name[id] <- gsub("Mr ", "", name[id])
+}
+
+# Function to get the born date from Wikipedia URL
+getbornDate_byURL <- function(url){
+  # Read HTML content from the Wikipedia URL
+  wiki_html <- read_html(url)
+  
+  # Extract labels and data from the infobox on the Wikipedia page
+  lables <- wiki_html %>%
+    html_elements(css = ".infobox-label") %>%
+    html_text()
+  data <- wiki_html %>%
+    html_elements(css = ".infobox-data") %>%
+    html_text()
+  
+  # Extract the born date based on the "Born" label
+  bornDate <- data[lables == "Born"]
+  return(bornDate)
+}
+
+# Construct the Wikipedia URL for the MP using their name
+wiki_url <- paste0("https://en.wikipedia.org/wiki/", gsub(" ", "_", name[id]))
+
+# Get the born date from the Wikipedia URL
+bornDate <- getbornDate_byURL(wiki_url)
+
+# If there are multiple webpages under the URL, attempt alternative URLs
+if(identical(bornDate, character(0))){
+  wiki_url <- paste0("https://en.wikipedia.org/wiki/", gsub(" ", "_", name[id]), "_(politician)")
+  bornDate <- getbornDate_byURL(wiki_url)
+  if(identical(bornDate, character(0)) & name[id] == "David Jones"){
+    wiki_url <- paste0("https://en.wikipedia.org/wiki/", gsub(" ", "_", name[id]), "_(Clwyd_West_MP)")
+    bornDate <- getbornDate_byURL(wiki_url)
+  }
+  
+  # Additional handling for specific cases
+  if(identical(bornDate, character(0)) & name[id] == "Robert Neill"){
+    wiki_url <- paste0("https://en.wikipedia.org/wiki/", "Bob_Neill")
+    bornDate <- getbornDate_byURL(wiki_url)
+  }
+}
+# Extract the birthdate using a regular expression
+bornDate <- str_match(bornDate, "([0-9]*-[0-9]*-[0-9]*)")[,2]
+
+# Convert the extracted birthdate to the Date format
+bornDate <- as.Date(bornDate, format = "%Y-%m-%d")
+
+# If the birthday does not conform to the standard format, attempt an alternative method
+if(is.na(bornDate)){
+  bornDate <- getbornDate_byURL(wiki_url)
+  # Extract the birth year using a regular expression
+  bornDate <- str_match(bornDate, "\\d{4}")[,1] %>%
+    as.Date(format = "%Y")
+}
+# Calculate the age based on the extracted or estimated birthdate
+age[id] <-getYearsBetween(bornDate)
+```
+
+## Appendix: All code in this assignment
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+# this chunk generates the complete code appendix. 
+# eval=FALSE tells R not to run (``evaluate'') the code here (it was already run before).
+```
